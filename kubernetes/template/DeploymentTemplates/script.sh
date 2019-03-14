@@ -1,22 +1,6 @@
 #! /bin/bash
 set -e
 
-function collect_deployment_and_operations {
-    DEPLOYLOGSDIR=/var/log/azure/arm-deployments/
-    sudo mkdir -p /var/log/azure/arm-deployments/
-
-    DEPLOYMENTS=$(az group deployment list --resource-group $RESOURCE_GROUP_NAME --query '[].name' --output tsv)
-
-    for deploy in $DEPLOYMENTS; do
-        az group deployment show --resource-group blah-rg --name $deploy | sudo tee $DEPLOYLOGSDIR/$deploy.deploy > /dev/null
-        az group deployment operation list --resource-group blah-rg --name $deploy | sudo tee $DEPLOYLOGSDIR/$deploy.operations > /dev/null
-    done
-
-    sudo chown -R $ADMIN_USERNAME:$ADMIN_USERNAME $DEPLOYLOGSDIR
-}
-
-# Collect deployment logs always, even if the script ends with an error
-trap collect_deployment_and_operations EXIT
 
 ### 
 #   <summary>
@@ -148,7 +132,6 @@ ensureCertificates()
 }
 
 # Basic details of the system
-log_level -i "Starting Kubernetes cluster deployment."
 log_level -i "Running  script as : $(whoami)"
 
 log_level -i "System information: $(sudo uname -a)"
@@ -225,26 +208,30 @@ retrycmd_if_failure 5 10 sudo apt-get install azure-cli
 log_level -i "Azure CLI version : $(az --version)"
 
 #####################################################################################
+#Section to install Go.
+
+wget https://dl.google.com/go/go1.11.4.linux-amd64.tar.gz
+ROOT_PATH=/home/azureuser
+mkdir $ROOT_PATH
+sudo mkdir $ROOT_PATH/bin
+sudo tar -C  $ROOT_PATH/bin -xzf go1.11.4.linux-amd64.tar.gz
+
+
+# Set the environment variables
+export GOPATH=/home/azureuser/src/github.com
+export GOROOT=/home/azureuser/bin/go
+export PATH=$GOPATH/bin:$GOROOT/bin:$PATH
+
+#####################################################################################
 #Section to install/get AKS-Engine binary.
 log_level -i "Getting AKS-Engine binary."
 
 # Todo update release branch details: msazurestackworkloads, azsmaster
-retrycmd_if_failure 5 10 git clone https://github.com/msazurestackworkloads/aks-engine -b azsmaster
+retrycmd_if_failure 5 10 git clone https://github.com/msazurestackworkloads/aks-engine/tree/next 
+cd /
 cd aks-engine
-
-log_level -i "We are going to use an existing AKS-Engine binary."
-log_level -i "Extract zip file."
-sudo mkdir bin
-sudo tar -zxvf examples/azurestack/aks-engine.tgz
-sudo mv aks-engine bin/
-
-log_level -i "Checking if aks-engine binary is available."
-if [ -f "./bin/aks-engine" ] ; then
-    log_level -i "Found aks-engine.exe"
-else
-    log_level -e "Missing aks-engine.exe. Exiting!"
-    exit 1
-fi
+mkdir $ROOT_PATH/src/github.com/Azure
+sudo mv aks-engine $ROOT_PATH/src/github.com/Azure
 
 #####################################################################################
 # Update certificates to right location as they are required 
@@ -261,6 +248,14 @@ log_level -i "EXTERNAL_FQDN is:$EXTERNAL_FQDN"
 log_level -i "TENANT_ENDPOINT is:$TENANT_ENDPOINT"
 
 retrycmd_if_failure 20 30 ensureCertificates
+
+#####################################################################################
+#Section to install kubectl
+
+cd $ROOT_PATH
+snap install kubectl --classic
+
+export PATH=$PATH:/usr/bin/snap
 
 #####################################################################################
 # Section to create API model file for AKS-Engine.
@@ -380,24 +375,9 @@ retrycmd_if_failure 5 10 az cloud set -n $ENVIRONMENT_NAME
 log_level -i "Update cloud profile with value: $HYBRID_PROFILE."
 retrycmd_if_failure 5 10 az cloud update --profile $HYBRID_PROFILE
 
-if [ $IDENTITY_SYSTEM == "ADFS" ] ; then
-    log_level -i "Login to ADFS environment using Azure CLI."
-    retrycmd_if_failure 5 10 az login --service-principal -u $SPN_CLIENT_ID  -p $PWD/$CERTIFICATE_PEM_LOCATION --tenant $TENANT_ID --output none
-else
-    log_level -i "Login to AAD environment using Azure CLI."
-    retrycmd_if_failure 5 10 az login --service-principal -u $SPN_CLIENT_ID -p $SPN_CLIENT_SECRET --tenant $TENANT_ID --output none
-fi
-
-log_level -i "Setting subscription to $TENANT_SUBSCRIPTION_ID"
-retrycmd_if_failure 5 10 az account set --subscription $TENANT_SUBSCRIPTION_ID --output none
-
-log_level -i "Generate ARM template using AKS-Engine."
-retrycmd_if_failure 5 10 sudo ./bin/aks-engine generate $AZURESTACK_CONFIGURATION
-
-log_level -i "ARM template generated at $PWD/_output/$MASTER_DNS_PREFIX directory. Now changing current path to given arm template directory."
-cd $PWD/_output/$MASTER_DNS_PREFIX 
-
-log_level -i "Deploy the template."
-az group deployment create -g $RESOURCE_GROUP_NAME --template-file azuredeploy.json --parameters azuredeploy.parameters.json --output none
-
-log_level -i "Kubernetes cluster deployment complete."
+export CLIENT_ID=$SPN_CLIENT_ID
+export CLIENT_SECRET=$SPN_CLIENT_SECRET
+export TENANT_ID= $TENANT_ID
+export SUBSCRIPTION_ID=$TENANT_SUBSCRIPTION_ID
+export CLEANUP_ON_EXIT=false
+export CLUSTER_DEFINITION=$AZURE_CONFIGURATION
